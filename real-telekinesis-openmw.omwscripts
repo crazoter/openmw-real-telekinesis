@@ -1,0 +1,3 @@
+GLOBAL: scripts/sw-reflect-projectile/global.lua
+PLAYER: scripts/sw-reflect-projectile/player.lua
+PLAYER, NPC, CREATURE: scripts/sw-reflect-projectile/PAIN.lua
