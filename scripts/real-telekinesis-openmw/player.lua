@@ -17,9 +17,10 @@ local ANY_PHY = Nearby.COLLISION_TYPE.AnyPhysical
 local ACTOR = Nearby.COLLISION_TYPE.Actor
 
 -- SCRIPT CONFIGURABLE CONSTANTS
-local PUSH_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
-local GRAB_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
+local PUSH_Z_OFFSET = 5             -- Offset from the ground, to prevent collision with ground
+local GRAB_Z_OFFSET = 5             -- Offset from the ground, to prevent collision with ground
 local PULL_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
+local ITEM_Z_OFFSET = 0             -- Items can be very flat so a low / zero z offset is optimal
 local PULL_INITIAL_Z_OFFSET = 30    -- Offset from the ground, to prevent collision with ground
 local BUMP_OFFSET = 25              -- Offset to prevent teleports from pushing objects through wall / floor
 local PULL_SMOOTH = 0.03            -- Base number to put together with smoothing
@@ -63,21 +64,30 @@ local KEY_GRAB = 'y'
 local KEY_PUSH = 'u'
 local KEY_PULL = 'i'
 local KEY_LIFT = 'o'
-local DETACH_CAM_WHEN_GRABBING = true
+local DETACH_CAM_WHEN_GRAB = true   -- Quality of life functionality where the camera doesn't necessarily track the mouse when grabbing a target
+local DETACH_CAM_MAG = 0.4          -- Magnitude to move camera when grabbing object
+local DETACH_CAM_SENS = 0.01        -- Sensitivity
+local DETACH_CAM_DIST = 1000          
 local rotaSpeed = 0                 -- You spin me right round right round
 
 -- SCRIPT LOCAL VARIABLES
-local grabbedObject = Nil
+local grabbedObject = nil
+local grabCamData = {
+    actualYaw = nil,
+    actualPitch = nil,
+    simulatedYaw = nil,
+    simulatedPitch = nil
+}
 local grabData = {
-    boundingData = Nil,
+    boundingData = nil,
     release = false,            -- Flag to set when releasing, so that the object is properly released on the next update
     isPulling = false,          -- Flags to track when the button is pressed
     isPushing = false,          -- Flags to track when the button is pressed
     crushDmg = 0,               -- Counter to track how much damage you crushed enemy for
-    v = Nil,                    -- Directional vector that object is moving in, not to be confused with camera direction.
+    v = nil,                    -- Directional vector that object is moving in, not to be confused with camera direction.
                                 -- Note that for simplicity, the tracking is immediate; v here is simply to track user movement for releasing the object.
-    camDistance = Nil,          -- Current distance between camera and grabbed object. Used for tracking position
-    prevPos = Nil,
+    camDistance = nil,          -- Current distance between camera and grabbed object. Used for tracking position
+    prevPos = nil,
     travelled = 0               -- Travelled distance by object
 }
 
@@ -181,7 +191,6 @@ local function tpWithCollision(target, boundingData, newPos, deltaSeconds, trave
             -- Shorten the actual moved amount
             local f = currVectorLen
             currVectorLen = (tmpPos - obstacle.hitPos):length() - BUMP_OFFSET
-            print("hit", f, currVectorLen)
 
             -- Deal damage to parties involved
             if validForDamage then
@@ -204,7 +213,6 @@ local function tpWithCollision(target, boundingData, newPos, deltaSeconds, trave
     end
 
     if collidedWithSomething then
-        print("p", dirVector, currVectorLen)
         local actualNewPos = pos + dirVector * currVectorLen
         Core.sendGlobalEvent('TK_Teleport', { object = target, newPos = actualNewPos, rotation = rotation })
         return actualNewPos
@@ -214,10 +222,17 @@ local function tpWithCollision(target, boundingData, newPos, deltaSeconds, trave
     end
 end
 
-local function getCameraDirData()
+local function getCameraDirData(camData)
     local pos = Camera.getPosition()
-    local pitch = -(Camera.getPitch() + Camera.getExtraPitch())
-    local yaw = (Camera.getYaw() + Camera.getExtraYaw())
+    local pitch = nil
+    local yaw = nil
+    if camData and camData.simulatedPitch and camData.simulatedYaw then
+        pitch = -camData.simulatedPitch
+        yaw = camData.simulatedYaw
+    else
+        pitch = -(Camera.getPitch() + Camera.getExtraPitch())
+        yaw = (Camera.getYaw() + Camera.getExtraYaw())
+    end
     local xzLen = math.cos(pitch)
     local x = xzLen * math.sin(yaw)
     local y = xzLen * math.cos(yaw)
@@ -226,7 +241,7 @@ local function getCameraDirData()
 end
 
 local function getObjInCrosshairs()
-    local pos, v = getCameraDirData()
+    local pos, v = getCameraDirData(nil)
     local dist = SKILL_RANGE + Camera.getThirdPersonDistance()
     local result = Nearby.castRenderingRay(pos, pos + v * dist)
     -- Ignore player if in 3rd person
@@ -288,6 +303,9 @@ local function getBoundingData(target, zOffset)
         -- Note that target will most likely be lying down if they are dead.
         local health = Types.Actor.stats.dynamic.health(target)
         if health.current <= 0 then height = height / 4 end
+    else
+        -- Items can be very flat, so it's important they don't have a zOffset
+        zOffset = ITEM_Z_OFFSET
     end
 
     return {
@@ -321,7 +339,7 @@ function onUpdate(deltaSeconds)
             if not o.travelled then o.travelled = 0 end
             o.seqInit = true
             o.tElapsed = deltaSeconds
-            o.prevPos = Nil
+            o.prevPos = nil
             o.dtPrevPos = 0
             o.stuckCount = 0
             if s.targetP then
@@ -390,7 +408,7 @@ function onUpdate(deltaSeconds)
             end
         end
 
-        if tpWithCollision(o.target, o.boundingData, newPos, deltaSeconds, o.travelled, Nil) then
+        if tpWithCollision(o.target, o.boundingData, newPos, deltaSeconds, o.travelled, nil) then
             if not o.contOnHit then
                 return false
             elseif not s.contOnHit then
@@ -429,14 +447,27 @@ function onUpdate(deltaSeconds)
             grabData.release = false
             grabData.isPulling = false
             grabData.isPushing = false
-            grabData.v = Nil
+            grabData.v = nil
             grabData.crushDmg = 0
-            grabData.distance = Nil
-            grabData.prevPos = Nil
+            grabData.distance = nil
+            grabData.prevPos = nil
             grabData.travelled = 0
-            grabbedObject = Nil
+            grabbedObject = nil
         else
-            local camPos, camV = getCameraDirData()
+            -- Manipulate camera
+            if DETACH_CAM_WHEN_GRAB then
+                local yawOffset = Input.getMouseMoveX() * DETACH_CAM_SENS
+                local pitchOffset = Input.getMouseMoveY() * DETACH_CAM_SENS
+                -- Simulate no change, but simulate change for the player's grabbed object position
+                grabCamData.actualYaw = grabCamData.actualYaw + yawOffset * DETACH_CAM_MAG
+                grabCamData.actualPitch = grabCamData.actualPitch + pitchOffset * DETACH_CAM_MAG
+                grabCamData.simulatedYaw = grabCamData.simulatedYaw + yawOffset
+                grabCamData.simulatedPitch = grabCamData.simulatedPitch + pitchOffset
+
+                Camera.setYaw(grabCamData.actualYaw + yawOffset * DETACH_CAM_MAG)
+                Camera.setPitch(grabCamData.actualPitch + pitchOffset * DETACH_CAM_MAG)
+            end
+            local camPos, camV = getCameraDirData(grabCamData)
             -- Initialize params if not already done so
             if not grabData.distance then
                 local boundingData = getBoundingData(grabbedObject, GRAB_Z_OFFSET)
@@ -446,7 +477,7 @@ function onUpdate(deltaSeconds)
             end
 
             -- User interaction
-            local newRotation = Nil
+            local newRotation = nil
             if grabData.isPushing and grabData.isPulling and grabbedObject.type.baseType == Types.Actor then
                 -- Deal damage to target if you're applying force in too many ways
                 local dmg = DMG_CRUSH * deltaSeconds
@@ -510,6 +541,13 @@ local function onKeyPress(key)
         if key.symbol == KEY_GRAB then
             local result = getObjInCrosshairs()
             grabbedObject = result.hitObject
+            if DETACH_CAM_WHEN_GRAB then
+                local pitch = Camera.getPitch() + Camera.getExtraPitch()
+                local yaw = Camera.getYaw() + Camera.getExtraYaw()
+                grabCamData = { actualYaw = yaw, actualPitch = pitch, simulatedYaw = yaw, simulatedPitch = pitch }
+                Camera.setMode(Camera.MODE.ThirdPerson)
+                Camera.setPreferredThirdPersonDistance(DETACH_CAM_DIST)
+            end
             if grabbedObject then
                 Ui.showMessage("Grab Object!")
             else
