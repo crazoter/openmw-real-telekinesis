@@ -17,10 +17,11 @@ local ANY_PHY = Nearby.COLLISION_TYPE.AnyPhysical
 local ACTOR = Nearby.COLLISION_TYPE.Actor
 
 -- SCRIPT CONFIGURABLE CONSTANTS
-local PUSH_Z_OFFSET = 5             -- Offset from the ground, to prevent collision with ground
+local PUSH_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
+local GRAB_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
 local PULL_Z_OFFSET = 10            -- Offset from the ground, to prevent collision with ground
 local PULL_INITIAL_Z_OFFSET = 30    -- Offset from the ground, to prevent collision with ground
-local BUMP_OFFSET = 50             -- Offset to prevent teleports from pushing objects through wall / floor
+local BUMP_OFFSET = 25              -- Offset to prevent teleports from pushing objects through wall / floor
 local PULL_SMOOTH = 0.03            -- Base number to put together with smoothing
 local MIN_PUSH_Z = 0.1              -- Alwys push target off the ground if possible to avoid ground collision
 local STUCK_DIST_THRESHOLD = 0.0001 -- Object has to move more than this distance per tick or sequence ends
@@ -31,9 +32,10 @@ local COLLISION_ATTEMPTS = 100      -- Maximum collision attempts to prevent pos
 local DMG_MOVE_THRESHOLD = 200      -- Must've travelled this much distance or no damage
 local GRAB_DMG_MOVE_THRESHOLD = 400 -- Must've travelled this much distance or no damage
 local GRAB_CRUSH_RAND_ROTA = 0.0001 -- Limits for crush effect
-local ITEM_HALF_WIDTH = 50
-local ITEM_HEIGHT = 50
+local ITEM_HALF_WIDTH = 20
+local ITEM_HEIGHT = 20
 local PREV_POS_UPDATE_DT = 50/1000
+local BOUNDING_DATA_PTS = 6
 
 local M_TO_UNITS = 400              -- Gut-feel conversion from meters to... whatever units Morrowind uses for distance
 local TERMINAL_VELOCITY = 53 * M_TO_UNITS   -- Maximum downward velocity by gravity. Super basic physics ok
@@ -103,7 +105,6 @@ local ragDollData = {}
         targetP     Vector3         Target position; if set, v is ignored and object is tweened to position instead.
         spd         float           Speed for targetP.
         smoothing   float           Multiplier applied to dist / origDist
-        zOffset     int             zOffset when checking for collision
         applyG      boolean         Optional: If set, apply gravity to v.
         timeout     float           Optional: Maximum time elapsed (seconds) until terminating sequence
         waterSlow   float           Optional: If set, continually reduce speed by this factor while in water.
@@ -151,62 +152,62 @@ local function dealDamage(target, dmg)
     -- Players or objects shouldn't get hurt
 end
 
--- Teleport with collision handling
+-- Teleport with collision handlingxxx
 -- Returns true (hitPos) if collision happened, otherwise false
-local function tpWithCollision(target, boundingData, newPos, zOffset, deltaSeconds, travelled, rotation)
-    zOffset = zOffset and zOffset or 0
-    local pos = target.position
-    local dirVector = newPos - pos
-    local actualObstacle = Nearby.castRay(pos, newPos, { collisionType = ANY_PHY, ignore = target })
-    local hoverNewPos = Util.vector3(newPos.x, newPos.y, newPos.z + zOffset)
-    -- Apply zOffset so we don't prematurely hit the floor
-    local obstacle = Nearby.castRay(
-        Util.vector3(pos.x, pos.y, pos.z + zOffset),
-        hoverNewPos,
-        {
-            collisionType = ANY_PHY,
-            ignore = target
-        }
-    )
-    if not obstacle.hitPos and actualObstacle.hitPos then
-        -- "Fly" over the actual obstacle
-        dirVector = Util.vector3(dirVector.x, dirVector.y, dirVector.z + zOffset)
-        -- Core.sendGlobalEvent('TK_Teleport', { object = target, newPos = hoverNewPos, rotation = rotation })
-        -- return false
+local function tpWithCollision(target, boundingData, newPos, deltaSeconds, travelled, rotation)
+    local pos = Util.vector3(target.position.x, target.position.y, target.position.z)
+
+    local dirVector = (newPos - pos):normalize()
+    local currVectorLen = (newPos - pos):length()
+    local validForDamage = (target == grabbedObject and travelled > GRAB_DMG_MOVE_THRESHOLD) or
+        (target ~= grabbedObject and travelled > DMG_MOVE_THRESHOLD)
+    local maxDamage = 0
+    local collidedWithSomething = false
+
+    -- Iterate through all bounding points, pushing back the travelled distance as necessary
+    for idx = 1, BOUNDING_DATA_PTS do
+        local tmpPos = pos + boundingData.sideVectors[idx]
+        local obstacle = Nearby.castRay(
+            tmpPos,
+            tmpPos + dirVector * math.max(0, currVectorLen),
+            {
+                collisionType = ANY_PHY,
+                ignore = target
+            }
+        )
+        if obstacle.hitPos and obstacle.hitObject ~= Self.object then
+            collidedWithSomething = true
+
+            -- Shorten the actual moved amount
+            local f = currVectorLen
+            currVectorLen = (tmpPos - obstacle.hitPos):length() - BUMP_OFFSET
+            print("hit", f, currVectorLen)
+
+            -- Deal damage to parties involved
+            if validForDamage then
+                local dmg = (pos - newPos):length() * DMG_MULT_SPD + travelled * DMG_MULT_DIST
+                if target == grabbedObject then
+                    dmg = dmg * DMG_MULT_GRABBED
+                end
+                dmg = math.floor(dmg)
+                maxDamage = math.max(maxDamage, dmg)
+                -- Deal damage to collided object
+                if obstacle.hitObject and obstacle.hitObject.type and obstacle.hitObject.type.baseType == Types.Actor then
+                    dealDamage(obstacle.hitObject, dmg)
+                end
+            end
+        end
     end
 
-    if obstacle.hitPos and obstacle.hitObject ~= Self.object then
-        -- Deal damage to everyone involved, only if there was actual movement
-        local dmg = 0
-        if (target == grabbedObject and travelled > GRAB_DMG_MOVE_THRESHOLD) or
-            (target ~= grabbedObject and travelled > DMG_MOVE_THRESHOLD) then
-            dmg = (pos - newPos):length() * DMG_MULT_SPD + travelled * DMG_MULT_DIST
-            if target == grabbedObject then
-                dmg = dmg * DMG_MULT_GRABBED
-            end
-            dmg = math.floor(dmg)
-        end
-        -- print("" .. (pos - newPos):length() .. "+" .. travelled)
-        -- print(obstacle.hitObject)
-        dealDamage(target, dmg)
-        -- Shift controlled object a little so that subsequent pushes won't push through anything it hits
-        local attempt = 0
-        local actualNewPos = Nil
-        while obstacle.hitPos and attempt < COLLISION_ATTEMPTS do
-            attempt = attempt + 1
-            if obstacle.hitObject and obstacle.hitObject.type and obstacle.hitObject.type.baseType == Types.Actor then
-                dealDamage(obstacle.hitObject, dmg)
-            end
-            actualNewPos = obstacle.hitPos + (pos - obstacle.hitPos):normalize() * BUMP_OFFSET
-            obstacle = Nearby.castRay(pos, actualNewPos, { collisionType = ANY_PHY, ignore = target })
-        end
-        -- print(attempt, actualNewPos)
-        if attempt >= COLLISION_ATTEMPTS then
-            return obstacle.hitPos
-        else
-            Core.sendGlobalEvent('TK_Teleport', { object = target, newPos = actualNewPos, rotation = rotation })
-            return actualNewPos
-        end
+    if maxDamage > 0 then
+        dealDamage(target, maxDamage)
+    end
+
+    if collidedWithSomething then
+        print("p", dirVector, currVectorLen)
+        local actualNewPos = pos + dirVector * currVectorLen
+        Core.sendGlobalEvent('TK_Teleport', { object = target, newPos = actualNewPos, rotation = rotation })
+        return actualNewPos
     else
         Core.sendGlobalEvent('TK_Teleport', { object = target, newPos = newPos, rotation = rotation })
         return false
@@ -245,10 +246,10 @@ end
     {
         halfWidth
         height
-        cornerVs: An array of 6 vector3s for the midpoint of every side of the bounding cube. Add position to get their actual position during runtime.
+        sideVectors: An array of 6 vector3s for the midpoint of every side of the bounding cube. Add position to get their actual position during runtime.
     }
 --]]
-local function getBoundingData(target)
+local function getBoundingData(target, zOffset)
     -- Items don't have collision
     local halfWidth = ITEM_HALF_WIDTH
     local height = ITEM_HEIGHT
@@ -293,7 +294,7 @@ local function getBoundingData(target)
             halfWidth = halfWidth, 
             height = height,
             sideVectors = {
-                -- Util.vector3(0, 0, 0), -- Assume position is bottom side. This is checked by default in tpWithCollision
+                Util.vector3(0, 0, zOffset), -- Assume position is bottom side
                 Util.vector3(0, 0, height), -- top
                 Util.vector3(halfWidth, 0, height / 2), -- rest of the sides
                 Util.vector3(-halfWidth, 0, height / 2),
@@ -389,7 +390,7 @@ function onUpdate(deltaSeconds)
             end
         end
 
-        if tpWithCollision(o.target, o.boundingData, newPos, s.zOffset, deltaSeconds, o.travelled, Nil) then
+        if tpWithCollision(o.target, o.boundingData, newPos, deltaSeconds, o.travelled, Nil) then
             if not o.contOnHit then
                 return false
             elseif not s.contOnHit then
@@ -411,14 +412,12 @@ function onUpdate(deltaSeconds)
         -- Throw object
         if grabData.release and grabData.v then
             -- This must be placed after the update code above
-            print(grabData.distance)
             table.insert(ragDollData, {
                 target = grabbedObject,
                 boundingData = grabData.boundingData,
                 seqs = {
                     {
                         v = grabData.v * math.min(GRAB_THROW_MULT_MAX, GRAB_THROW_MULT * GRAB_THROW_DIST_MULT / grabData.distance),
-                        zOffset = PUSH_Z_OFFSET,
                         timeout = MAX_TIMEOUT,
                         waterSlow = PULL_WATERSLOW,
                         applyG = true
@@ -440,7 +439,7 @@ function onUpdate(deltaSeconds)
             local camPos, camV = getCameraDirData()
             -- Initialize params if not already done so
             if not grabData.distance then
-                local boundingData = getBoundingData(grabbedObject)
+                local boundingData = getBoundingData(grabbedObject, GRAB_Z_OFFSET)
                 grabData.boundingData = boundingData
                 grabData.prevPos = grabbedObject.position
                 grabData.distance = (camPos - grabbedObject.position):length()
@@ -471,8 +470,8 @@ function onUpdate(deltaSeconds)
             -- print(newPos, grabData.prevPos, grabData.distance, grabData.v, deltaDistance, grabData.travelled)
             grabData.prevPos = grabbedObject.position
 
-            -- Move object. Always move because otherwise morrowind's gravity will take over
-            local actualNewPos = tpWithCollision(grabbedObject, grabData.boundingData, newPos, 10, deltaSeconds, grabData.travelled, newRotation)
+            -- Move object. Always move because     otherwise morrowind's gravity will take over
+            local actualNewPos = tpWithCollision(grabbedObject, grabData.boundingData, newPos, deltaSeconds, grabData.travelled, newRotation)
             if actualNewPos then
                 -- Reset travelled distance so that bump damage will not be per frame
                 grabData.travelled = 0
@@ -484,7 +483,7 @@ function onUpdate(deltaSeconds)
 end
 
 local function onInputAction(id)
-    if grabbedObject and id == Input.ACRTION.Activate then
+    if grabbedObject and id == Input.ACTION.Activate then
         grabData.release = true
     end
 end
@@ -530,7 +529,7 @@ local function onKeyPress(key)
                 local setNewZ = target.type.baseType ~= Types.Actor or not Types.Actor.isSwimming(target)
                 local newV = setNewZ and Util.vector3(v.x, v.y, math.max(MIN_PUSH_Z, v.z)) or v
                 target:sendEvent('TK_EmptyFatigue', {})
-                local boundingData = getBoundingData(target)
+                local boundingData = getBoundingData(target, PUSH_Z_OFFSET)
                 -- Register it for animation
                 table.insert(ragDollData, {
                     target = target,
@@ -538,7 +537,6 @@ local function onKeyPress(key)
                     seqs = {
                         {
                             v = newV * PUSH_SPD,
-                            zOffset = PUSH_Z_OFFSET,
                             timeout = MAX_TIMEOUT,
                             waterSlow = PULL_WATERSLOW,
                             applyG = true
@@ -560,7 +558,7 @@ local function onKeyPress(key)
                 local camZ = Camera.getPosition().z
                 local newZ = target.type.baseType == Types.Actor and (camZ + Self.position.z) / 2 or camZ
                 local newPos = Util.vector3(Self.position.x, Self.position.y, newZ) + v * PULL_OFFSET
-                local boundingData = getBoundingData(target)
+                local boundingData = getBoundingData(target, PULL_Z_OFFSET)
                 table.insert(ragDollData, {
                     target = target,
                     boundingData = boundingData,
@@ -569,7 +567,6 @@ local function onKeyPress(key)
                             targetP = newPos,
                             spd = PULL_SPD,
                             smoothing = PULL_SMOOTH,
-                            zOffset = PULL_Z_OFFSET,
                             timeout = MAX_TIMEOUT,
                             waterSlow = PULL_WATERSLOW
                         }
@@ -587,7 +584,7 @@ local function onKeyPress(key)
                     return ragDollData[i].target ~= target
                 end)
                 local newPos = Util.vector3(target.position.x, target.position.y, target.position.z + LIFT_OFFSET)
-                local boundingData = getBoundingData(target)
+                local boundingData = getBoundingData(target, PULL_Z_OFFSET)
                 table.insert(ragDollData, {
                     target = target,
                     boundingData = boundingData,
@@ -596,7 +593,6 @@ local function onKeyPress(key)
                             targetP = newPos,
                             spd = LIFT_SPD,
                             smoothing = PULL_SMOOTH,
-                            zOffset = PULL_Z_OFFSET,
                             timeout = MAX_TIMEOUT,
                             waterSlow = PULL_WATERSLOW
                         }
