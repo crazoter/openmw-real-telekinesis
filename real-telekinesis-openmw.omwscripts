@@ -1,3 +1,3 @@
-GLOBAL: scripts/sw-reflect-projectile/global.lua
-PLAYER: scripts/sw-reflect-projectile/player.lua
-PLAYER, NPC, CREATURE: scripts/sw-reflect-projectile/PAIN.lua
+GLOBAL: scripts/real-telekinesis-openmw/global.lua
+PLAYER: scripts/real-telekinesis-openmw/player.lua
+PLAYER, NPC, CREATURE: scripts/real-telekinesis-openmw/PAIN.lua
