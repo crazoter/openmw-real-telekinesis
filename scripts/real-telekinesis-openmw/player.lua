@@ -46,7 +46,7 @@ local PLAYER_WIDTH = 100            -- For camera purposes, if in 3rd person, sp
 local COLLISION_ATTEMPTS = 100      -- Maximum collision attempts to prevent possible inf loops
 local DMG_MOVE_THRESHOLD = 100      -- Must've travelled this much distance or no damage, or:
 local DMG_DISP_THRESHOLD = 120      -- Must've travelled at this speed or no damage
-local GRAB_DMG_MOVE_THRESHOLD = 400 -- Must've travelled this much distance or no damage
+local GRAB_DMG_MOVE_THRESHOLD = 200 -- Must've travelled this much distance or no damage
 local GRAB_CRUSH_RAND_ROTA = 0.0001 -- Limits for crush effect
 local ITEM_HALF_WIDTH = 20          -- Bounding box data for items
 local ITEM_HEIGHT = 20              -- Bounding box data for items
@@ -720,13 +720,13 @@ local function tpWithCollision(target, boundingData, newPos, deltaSeconds, trave
     local pos = target.position
     local dirVector = (newPos - pos):normalize()
     local currVectorLen = (newPos - pos):length()
-    print(currVectorLen)
+    -- print(currVectorLen)
     local validForDamage = (
         target == grabbedObject and (
-            (isActor(target) and (travelled > GRAB_DMG_MOVE_THRESHOLD or currVectorLen > DMG_DISP_THRESHOLD)) or
+            (isActor(target) and travelled > GRAB_DMG_MOVE_THRESHOLD) or
             (isItem(target) and travelled > ITEM_ROTA_REQ))
         ) or (
-        target ~= grabbedObject and travelled > DMG_MOVE_THRESHOLD
+        target ~= grabbedObject and (travelled > DMG_MOVE_THRESHOLD or currVectorLen > DMG_DISP_THRESHOLD)
     )
     local maxDamage = 0
     local collidedWithSomething = false
