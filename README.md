@@ -49,6 +49,13 @@ Thank you for watching. If you liked this video please sub, nah I am just kiddin
 - Level restrictions: You will consume magicka even if the target resists your attack. Use a weaker power like grab to test your opponent first.
 - Combos: While there is a creature / object currently affected by your telekinesis, push, pull, or lift powers can be used at half cost. Players are encouraged to chain force powers together to manage their magicka usage.
 
+### Default keymappings
+- Grab: g
+- Push: z
+- Pull: x
+- Lift: c
+- Toggle Jedi Academy-esque Camera: v
+
 ### Description of Force Powers
 #### Push
 - Telekinetic Push (Single Target) (Cast time: 0.2s, Base cost: 30): Telekinetic push at a single target that the player's crosshair is on. Knocks target down.
